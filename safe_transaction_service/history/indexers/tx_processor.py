@@ -12,17 +12,16 @@ from eth_typing import ChecksumAddress, HexStr
 from eth_utils import event_abi_to_log_topic
 from hexbytes import HexBytes
 from packaging.version import Version
-from web3 import Web3
-
-from gnosis.eth import EthereumClient, EthereumClientProvider
-from gnosis.eth.constants import NULL_ADDRESS
-from gnosis.eth.contracts import (
+from safe_eth.eth import EthereumClient, get_auto_ethereum_client
+from safe_eth.eth.constants import NULL_ADDRESS
+from safe_eth.eth.contracts import (
     get_safe_V1_0_0_contract,
     get_safe_V1_3_0_contract,
     get_safe_V1_4_1_contract,
 )
-from gnosis.safe import SafeTx
-from gnosis.safe.safe_signature import SafeSignature, SafeSignatureApprovedHash
+from safe_eth.safe import SafeTx
+from safe_eth.safe.safe_signature import SafeSignature, SafeSignatureApprovedHash
+from web3 import Web3
 
 from safe_transaction_service.account_abstraction.services import (
     AaProcessorService,
@@ -41,6 +40,7 @@ from ..models import (
     SafeContractDelegate,
     SafeLastStatus,
     SafeMasterCopy,
+    SafeRelevantTransaction,
     SafeStatus,
 )
 
@@ -64,7 +64,7 @@ class SafeTxProcessorProvider:
         if not hasattr(cls, "instance"):
             from django.conf import settings
 
-            ethereum_client = EthereumClientProvider()
+            ethereum_client = get_auto_ethereum_client()
             ethereum_tracing_client = (
                 EthereumClient(settings.ETHEREUM_TRACING_NODE_URL)
                 if settings.ETHEREUM_TRACING_NODE_URL
@@ -146,12 +146,18 @@ class SafeTxProcessor(TxProcessor):
             Version("1.3.0"),  # ChainId was included
         )
 
-    def clear_cache(self, safe_address: Optional[ChecksumAddress] = None) -> None:
+    def clear_cache(self, safe_address: Optional[ChecksumAddress] = None) -> bool:
+        """
+        :param safe_address:
+        :return: `True` if anything was deleted from cache, `False` otherwise
+        """
         if safe_address:
-            if safe_address in self.safe_last_status_cache:
+            if result := (safe_address in self.safe_last_status_cache):
                 del self.safe_last_status_cache[safe_address]
+            return result
         else:
             self.safe_last_status_cache.clear()
+            return True
 
     def is_failed(
         self, ethereum_tx: EthereumTx, safe_tx_hash: Union[HexStr, bytes]
@@ -542,6 +548,11 @@ class SafeTxProcessor(TxProcessor):
                         "failed": failed,
                     },
                 )
+                SafeRelevantTransaction.objects.get_or_create(
+                    ethereum_tx=ethereum_tx,
+                    safe=contract_address,
+                    defaults={"timestamp": ethereum_tx.created},
+                )
                 # Detect 4337 UserOperations in this transaction
                 number_detected_user_operations = (
                     self.aa_processor_service.process_aa_transaction(
@@ -610,7 +621,7 @@ class SafeTxProcessor(TxProcessor):
                         self.get_safe_version_from_master_copy(
                             safe_last_status.master_copy
                         )
-                        or "1.0.0"
+                        or "1.3.0"
                     )
                 else:
                     base_gas = arguments["dataGas"]
@@ -655,6 +666,11 @@ class SafeTxProcessor(TxProcessor):
                         "failed": failed,
                         "trusted": True,
                     },
+                )
+                SafeRelevantTransaction.objects.get_or_create(
+                    ethereum_tx=ethereum_tx,
+                    safe=contract_address,
+                    defaults={"timestamp": ethereum_tx.created},
                 )
 
                 # Don't modify created

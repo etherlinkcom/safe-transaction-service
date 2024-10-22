@@ -7,19 +7,18 @@ from django.db import transaction
 
 from eth_typing import ChecksumAddress, HexStr
 from hexbytes import HexBytes
-from web3.types import LogReceipt
-
-from gnosis.eth import EthereumClient, EthereumClientProvider
-from gnosis.eth.account_abstraction import (
+from safe_eth.eth import EthereumClient, get_auto_ethereum_client
+from safe_eth.eth.account_abstraction import (
     BundlerClient,
     BundlerClientException,
     UserOperation,
     UserOperationReceipt,
     UserOperationV07,
 )
-from gnosis.eth.utils import fast_to_checksum_address
-from gnosis.safe.account_abstraction import SafeOperation
-from gnosis.safe.safe_signature import SafeSignature
+from safe_eth.eth.utils import fast_to_checksum_address
+from safe_eth.safe.account_abstraction import SafeOperation
+from safe_eth.safe.safe_signature import SafeSignature
+from web3.types import LogReceipt
 
 from safe_transaction_service.history import models as history_models
 
@@ -37,13 +36,17 @@ class AaProcessorServiceException(Exception):
     pass
 
 
-class UserOperationNotSupportedException(Exception):
+class UserOperationNotSupportedException(AaProcessorServiceException):
+    pass
+
+
+class UserOperationReceiptNotFoundException(AaProcessorServiceException):
     pass
 
 
 @cache
 def get_aa_processor_service() -> "AaProcessorService":
-    ethereum_client = EthereumClientProvider()
+    ethereum_client = get_auto_ethereum_client()
     bundler_client = get_bundler_client()
     if not bundler_client:
         logger.warning("Ethereum 4337 bundler client was not configured")
@@ -117,7 +120,7 @@ class AaProcessorService:
         parsed_signatures = SafeSignature.parse_signature(
             signature,
             safe_operation_model.hash,
-            safe_operation.safe_operation_hash_preimage,
+            safe_hash_preimage=safe_operation.safe_operation_hash_preimage,
         )
 
         safe_operation_confirmations = []
@@ -211,22 +214,28 @@ class AaProcessorService:
         :return: Tuple with ``UserOperation`` and ``UserOperationReceipt``
         """
         safe_address = user_operation_model.sender
-        user_operation_hash = HexBytes(user_operation_model.hash).hex()
+        user_operation_hash_hex = HexBytes(user_operation_model.hash).hex()
         tx_hash = HexBytes(user_operation_model.ethereum_tx_id).hex()
         logger.debug(
             "[%s] Retrieving UserOperation Receipt with user-operation-hash=%s on tx-hash=%s",
             safe_address,
-            user_operation_hash,
+            user_operation_hash_hex,
             tx_hash,
         )
         user_operation_receipt = self.bundler_client.get_user_operation_receipt(
-            user_operation_hash
+            user_operation_hash_hex
         )
+        if not user_operation_receipt:
+            # This is totally unexpected, receipt should be available in the Bundler RPC
+            raise UserOperationReceiptNotFoundException(
+                f"Cannot find receipt for user-operation={user_operation_hash_hex}"
+            )
+
         if not user_operation_receipt.success:
             logger.info(
                 "[%s] UserOperation user-operation-hash=%s on tx-hash=%s failed, indexing either way",
                 safe_address,
-                user_operation_hash,
+                user_operation_hash_hex,
                 tx_hash,
             )
 
@@ -237,7 +246,7 @@ class AaProcessorService:
         logger.debug(
             "[%s] Storing UserOperation Receipt with user-operation=%s on tx-hash=%s",
             safe_address,
-            user_operation_hash,
+            user_operation_hash_hex,
             tx_hash,
         )
 
@@ -331,7 +340,7 @@ class AaProcessorService:
                     nonce=user_operation.nonce,
                     init_code=user_operation.init_code,
                     call_data=user_operation.call_data,
-                    call_data_gas_limit=user_operation.call_gas_limit,
+                    call_gas_limit=user_operation.call_gas_limit,
                     verification_gas_limit=user_operation.verification_gas_limit,
                     pre_verification_gas=user_operation.pre_verification_gas,
                     max_fee_per_gas=user_operation.max_fee_per_gas,
@@ -383,15 +392,21 @@ class AaProcessorService:
                     safe_address,
                     exc,
                 )
-            except BundlerClientException as exc:
+            except UserOperationReceiptNotFoundException as exc:
                 logger.error(
-                    "[%s] Error retrieving user-operation from bundler API: %s",
+                    "[%s] Cannot find receipt for user-operation: %s",
                     safe_address,
                     exc,
                 )
             except AaProcessorServiceException as exc:
                 logger.error(
                     "[%s] Error processing user-operation: %s",
+                    safe_address,
+                    exc,
+                )
+            except BundlerClientException as exc:
+                logger.error(
+                    "[%s] Error retrieving user-operation from bundler API: %s",
                     safe_address,
                     exc,
                 )

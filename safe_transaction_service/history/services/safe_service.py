@@ -4,17 +4,16 @@ from datetime import datetime
 from typing import Optional, Tuple, Union
 
 from eth_typing import ChecksumAddress
-from web3 import Web3
-
-from gnosis.eth import EthereumClient, EthereumClientProvider
-from gnosis.eth.contracts import (
+from safe_eth.eth import EthereumClient, get_auto_ethereum_client
+from safe_eth.eth.contracts import (
     get_cpk_factory_contract,
     get_proxy_factory_V1_3_0_contract,
     get_proxy_factory_V1_4_1_contract,
 )
-from gnosis.safe import Safe
-from gnosis.safe.exceptions import CannotRetrieveSafeInfoException
-from gnosis.safe.safe import SafeInfo
+from safe_eth.safe import Safe
+from safe_eth.safe.exceptions import CannotRetrieveSafeInfoException
+from safe_eth.safe.safe import SafeInfo
+from web3 import Web3
 
 from safe_transaction_service.account_abstraction import models as aa_models
 
@@ -55,7 +54,7 @@ class SafeServiceProvider:
         if not hasattr(cls, "instance"):
             from django.conf import settings
 
-            ethereum_client = EthereumClientProvider()
+            ethereum_client = get_auto_ethereum_client()
             ethereum_tracing_client = (
                 EthereumClient(settings.ETHEREUM_TRACING_NODE_URL)
                 if settings.ETHEREUM_TRACING_NODE_URL
